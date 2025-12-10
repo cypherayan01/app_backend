@@ -69,28 +69,82 @@ class JobSearchResponse(BaseModel):
     processing_time_ms: int
 
 
+# NCS API Authentication Models
+class NCSLoginRequest(BaseModel):
+    Username: str
+    Password: str
+
+
+class NCSLoginResponse(BaseModel):
+    token: str
+    message: Optional[str] = None
+
+
+class NCSVacancyDataRequest(BaseModel):
+    UserName: str
+    OptionID: int = 1
+    FromDate: str  # Format: "YYYY-MM-DD"
+    ToDate: str  # Format: "YYYY-MM-DD"
+    StateID: Optional[str] = ""
+    DistrictID: Optional[str] = ""
+    JobTitle: Optional[str] = ""
+    Keywords: Optional[str] = ""
+    Gender: Optional[str] = ""
+    HighestEducation: Optional[str] = ""
+    Age: Optional[str] = ""
+    PageNumber: str = "1"
+    PageSize: str = "25"
+
+
+# Request model for consume_api endpoint
+class ConsumeAPIRequest(BaseModel):
+    username: str = Field(..., description="NCS API username for login")
+    password: str = Field(..., description="NCS API password for login")
+    from_date: str = Field(..., description="Start date in YYYY-MM-DD format")
+    to_date: str = Field(..., description="End date in YYYY-MM-DD format")
+    state_id: Optional[str] = Field(default="", description="Optional state ID filter")
+    district_id: Optional[str] = Field(default="", description="Optional district ID filter")
+    job_title: Optional[str] = Field(default="", description="Optional job title filter")
+    keywords: Optional[str] = Field(default="", description="Optional keywords filter")
+    gender: Optional[str] = Field(default="", description="Optional gender filter")
+    highest_education: Optional[str] = Field(default="", description="Optional education filter")
+    age: Optional[str] = Field(default="", description="Optional age filter")
+    page_number: str = Field(default="1", description="Page number for pagination")
+    page_size: str = Field(default="25", description="Number of results per page")
+
+
+# JobData model matching the new NCS API response format
 class JobData(BaseModel):
-    keywords: str
-    ncsp_job_id: str
-    date: date
-    organization_id: int
-    organization_name: str
-    number_of_openings: int
-    industry_name: str
-    sector_name: str
-    functional_area_name: str
-    functional_role_name: str
-    avg_experience: int
-    avg_wage: int
-    gender_code: str
-    highest_qualification: str
-    state_name: str
-    district_name: str
-    title: str
-    description: str
-    pin_code: Optional[str] = None
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
+    JobID: int
+    EmployerName: str
+    JobTitle: str
+    MinimumExperience: Optional[int] = 0
+    MaximunExperience: Optional[int] = 0  # Note: API has typo "Maximun"
+    AverageExp: Optional[int] = 0
+    JobStartDate: Optional[str] = None
+    JobExpiryDate: Optional[str] = None
+    MaximunWages: Optional[int] = 0  # Note: API has typo "Maximun"
+    MinimumWages: Optional[int] = 0
+    AverageWage: Optional[int] = 0
+    NumberofOpenings: Optional[int] = 1
+    EmploymentType: Optional[str] = None
+    IndustryID: Optional[int] = None
+    IndustryName: Optional[str] = None
+    SectorId: Optional[int] = None
+    SectorName: Optional[str] = None
+    Qualification: Optional[str] = None
+    WageTypeDesc: Optional[str] = None
+    StateName: Optional[str] = None
+    DistrictName: Optional[str] = None
+    FunctionalAreaName: Optional[str] = None
+    FunctionalRoleName: Optional[str] = None
+    JobDescription: Optional[str] = None
+    VacancyURL: Optional[str] = None
+    PostedDate: Optional[str] = None
+    Skills: Optional[str] = None
+    EmployerMobile: Optional[str] = None
+    EmployerEmail: Optional[str] = None
+    PersonName: Optional[str] = None
 
 
 class LocationJobRequest(BaseModel):

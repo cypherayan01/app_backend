@@ -6,7 +6,8 @@ from fastapi import APIRouter, HTTPException
 from config.database import DatabasePool
 from models.job import (
     JobSearchRequest, JobSearchResponse, JobResult,
-    JobData, ConsumeAPIResponse
+    JobData, ConsumeAPIResponse, ConsumeAPIRequest,
+    NCSLoginRequest, NCSVacancyDataRequest
 )
 from services.embedding_service import LocalEmbeddingService
 from services.vector_store import FAISSVectorStore
@@ -119,28 +120,86 @@ async def search_jobs(request: JobSearchRequest) -> JobSearchResponse:
 
 
 @router.post("/consume_api", response_model=ConsumeAPIResponse)
-async def consume_api_endpoint():
+async def consume_api_endpoint(request: ConsumeAPIRequest):
     """
-    Endpoint to consume external API and store job data in database
+    Endpoint to consume NCS Vacancy API and store job data in database.
+
+    Flow:
+    1. Authenticate with NCS login endpoint to get token
+    2. Use token to fetch vacancy data from NCS API
+    3. Store the job data in database
     """
     import httpx
 
+    # NCS API URLs (Dev Environment)
+    LOGIN_URL = "https://stagingncsapi.ncs.gov.in/api/login"
+    VACANCY_DATA_URL = "https://stagingncsapi.ncs.gov.in/api/NCS/v1/NCSVacancyDataAPI/Data"
+
     try:
-        # External API URL - replace with actual API endpoint
-        api_url = "YOUR_EXTERNAL_API_URL_HERE"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # Step 1: Authenticate and get token
+            logger.info("Authenticating with NCS API...")
+            login_payload = {
+                "Username": request.username,
+                "Password": request.password
+            }
 
-        # Make HTTP request to external API
-        async with httpx.AsyncClient() as client:
-            response = await client.get(api_url)
-            response.raise_for_status()
+            login_response = await client.post(LOGIN_URL, json=login_payload)
+            login_response.raise_for_status()
 
-        # Parse JSON response
-        job_data_list = response.json()
+            login_data = login_response.json()
+            token = login_data.get("token")
 
-        if not isinstance(job_data_list, list):
-            raise HTTPException(status_code=400, detail="API response should be a list of job objects")
+            if not token:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Authentication failed: No token received from NCS API"
+                )
 
-        # Store data in database
+            logger.info("Successfully authenticated with NCS API")
+
+            # Step 2: Fetch vacancy data using the token
+            logger.info("Fetching vacancy data from NCS API...")
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+
+            vacancy_payload = {
+                "UserName": request.username,
+                "OptionID": 1,
+                "FromDate": request.from_date,
+                "ToDate": request.to_date,
+                "StateID": request.state_id,
+                "DistrictID": request.district_id,
+                "JobTitle": request.job_title,
+                "Keywords": request.keywords,
+                "Gender": request.gender,
+                "HighestEducation": request.highest_education,
+                "Age": request.age,
+                "PageNumber": request.page_number,
+                "PageSize": request.page_size
+            }
+
+            vacancy_response = await client.post(
+                VACANCY_DATA_URL,
+                json=vacancy_payload,
+                headers=headers
+            )
+            vacancy_response.raise_for_status()
+
+            # Parse JSON response
+            job_data_list = vacancy_response.json()
+
+            if not isinstance(job_data_list, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail="API response should be a list of job objects"
+                )
+
+            logger.info(f"Received {len(job_data_list)} jobs from NCS API")
+
+        # Step 3: Store data in database
         jobs_processed = 0
 
         async with DatabasePool.acquire() as conn:
@@ -149,77 +208,106 @@ async def consume_api_endpoint():
                     # Validate job data structure
                     job_data = JobData(**job_item)
 
-                    # Insert into database
+                    # Insert into database with new schema
                     insert_query = """
-                    INSERT INTO job_data
-                    (keywords, ncsp_job_id, date, organization_id, organization_name,
-                     number_of_openings, industry_name, sector_name, functional_area_name,
-                     functional_role_name, avg_experience, avg_wage, gender_code,
-                     highest_qualification, state_name, district_name, title, description,
-                     pin_code, latitude, longitude, created_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())
-                    ON CONFLICT (ncsp_job_id) DO UPDATE SET
-                        keywords = EXCLUDED.keywords,
-                        organization_name = EXCLUDED.organization_name,
+                    INSERT INTO ncs_job_data
+                    (job_id, employer_name, job_title, minimum_experience, maximum_experience,
+                     average_experience, job_start_date, job_expiry_date, maximum_wages, minimum_wages,
+                     average_wage, number_of_openings, employment_type, industry_id, industry_name,
+                     sector_id, sector_name, qualification, wage_type_desc, state_name, district_name,
+                     functional_area_name, functional_role_name, job_description, vacancy_url,
+                     posted_date, skills, employer_mobile, employer_email, person_name, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, NOW())
+                    ON CONFLICT (job_id) DO UPDATE SET
+                        employer_name = EXCLUDED.employer_name,
+                        job_title = EXCLUDED.job_title,
+                        minimum_experience = EXCLUDED.minimum_experience,
+                        maximum_experience = EXCLUDED.maximum_experience,
+                        average_experience = EXCLUDED.average_experience,
+                        job_start_date = EXCLUDED.job_start_date,
+                        job_expiry_date = EXCLUDED.job_expiry_date,
+                        maximum_wages = EXCLUDED.maximum_wages,
+                        minimum_wages = EXCLUDED.minimum_wages,
+                        average_wage = EXCLUDED.average_wage,
                         number_of_openings = EXCLUDED.number_of_openings,
+                        employment_type = EXCLUDED.employment_type,
+                        industry_id = EXCLUDED.industry_id,
                         industry_name = EXCLUDED.industry_name,
+                        sector_id = EXCLUDED.sector_id,
                         sector_name = EXCLUDED.sector_name,
-                        functional_area_name = EXCLUDED.functional_area_name,
-                        functional_role_name = EXCLUDED.functional_role_name,
-                        avg_experience = EXCLUDED.avg_experience,
-                        avg_wage = EXCLUDED.avg_wage,
-                        gender_code = EXCLUDED.gender_code,
-                        highest_qualification = EXCLUDED.highest_qualification,
+                        qualification = EXCLUDED.qualification,
+                        wage_type_desc = EXCLUDED.wage_type_desc,
                         state_name = EXCLUDED.state_name,
                         district_name = EXCLUDED.district_name,
-                        title = EXCLUDED.title,
-                        description = EXCLUDED.description,
-                        pin_code = EXCLUDED.pin_code,
-                        latitude = EXCLUDED.latitude,
-                        longitude = EXCLUDED.longitude,
+                        functional_area_name = EXCLUDED.functional_area_name,
+                        functional_role_name = EXCLUDED.functional_role_name,
+                        job_description = EXCLUDED.job_description,
+                        vacancy_url = EXCLUDED.vacancy_url,
+                        posted_date = EXCLUDED.posted_date,
+                        skills = EXCLUDED.skills,
+                        employer_mobile = EXCLUDED.employer_mobile,
+                        employer_email = EXCLUDED.employer_email,
+                        person_name = EXCLUDED.person_name,
                         updated_at = NOW()
                     """
 
                     await conn.execute(
                         insert_query,
-                        job_data.keywords,
-                        job_data.ncsp_job_id,
-                        job_data.date,
-                        job_data.organization_id,
-                        job_data.organization_name,
-                        job_data.number_of_openings,
-                        job_data.industry_name,
-                        job_data.sector_name,
-                        job_data.functional_area_name,
-                        job_data.functional_role_name,
-                        job_data.avg_experience,
-                        job_data.avg_wage,
-                        job_data.gender_code,
-                        job_data.highest_qualification,
-                        job_data.state_name,
-                        job_data.district_name,
-                        job_data.title,
-                        job_data.description,
-                        job_data.pin_code,
-                        job_data.latitude,
-                        job_data.longitude
+                        job_data.JobID,
+                        job_data.EmployerName,
+                        job_data.JobTitle,
+                        job_data.MinimumExperience,
+                        job_data.MaximunExperience,
+                        job_data.AverageExp,
+                        job_data.JobStartDate,
+                        job_data.JobExpiryDate,
+                        job_data.MaximunWages,
+                        job_data.MinimumWages,
+                        job_data.AverageWage,
+                        job_data.NumberofOpenings,
+                        job_data.EmploymentType,
+                        job_data.IndustryID,
+                        job_data.IndustryName,
+                        job_data.SectorId,
+                        job_data.SectorName,
+                        job_data.Qualification,
+                        job_data.WageTypeDesc,
+                        job_data.StateName,
+                        job_data.DistrictName,
+                        job_data.FunctionalAreaName,
+                        job_data.FunctionalRoleName,
+                        job_data.JobDescription,
+                        job_data.VacancyURL,
+                        job_data.PostedDate,
+                        job_data.Skills,
+                        job_data.EmployerMobile,
+                        job_data.EmployerEmail,
+                        job_data.PersonName
                     )
 
                     jobs_processed += 1
 
                 except Exception as e:
-                    logger.error(f"Error processing job item: {e}")
+                    logger.error(f"Error processing job item {job_item.get('JobID', 'unknown')}: {e}")
                     continue
 
+        logger.info(f"Successfully processed {jobs_processed} jobs from NCS API")
+
         return ConsumeAPIResponse(
-            message=f"Successfully processed {jobs_processed} jobs from external API",
+            message=f"Successfully processed {jobs_processed} jobs from NCS API",
             jobs_processed=jobs_processed,
             success=True
         )
 
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error when calling NCS API: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"NCS API error: {e.response.text}"
+        )
     except httpx.HTTPError as e:
-        logger.error(f"HTTP error when calling external API: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch data from external API: {str(e)}")
+        logger.error(f"HTTP error when calling NCS API: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch data from NCS API: {str(e)}")
     except Exception as e:
         logger.error(f"Error in consume_api_endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
@@ -228,57 +316,75 @@ async def consume_api_endpoint():
 @router.post("/consume_api_test", response_model=ConsumeAPIResponse)
 async def consume_api_test_endpoint():
     """
-    Test endpoint to consume sample job data and store in database
-    Uses sample data instead of external API for testing
+    Test endpoint to consume sample NCS job data and store in database.
+    Uses sample data matching the new NCS API response format for testing.
     """
     try:
-        # Sample job data for testing
+        # Sample job data matching the new NCS API response format
         job_data_list = [
             {
-                "keywords": "acquisition,local language,Marketing,personalized,Retention,Tenured,visibility",
-                "ncsp_job_id": "20V63-0942298873242J",
-                "date": "2025-05-08",
-                "organization_id": 2244622,
-                "organization_name": "MUTHOOT FINANCE LTD",
-                "number_of_openings": 700,
-                "industry_name": "Finance and Insurance",
-                "sector_name": "Company",
-                "functional_area_name": "Marketing & Sales",
-                "functional_role_name": "Sales Executive",
-                "avg_experience": 0,
-                "avg_wage": 11000,
-                "gender_code": "A",
-                "highest_qualification": "Graduate",
-                "state_name": "Telangana",
-                "district_name": "Multiple Districts",
-                "title": "BRANCH SALES",
-                "description": "Key Responsibilities Assist in daily branch Gold loan operations and customer service. Support branch team in handling customer queries and resolving issues. Participate in lead generation, client acquisition, and retention activities. Help execute market",
-                "pin_code": None,
-                "latitude": None,
-                "longitude": None
+                "JobID": 5427169,
+                "EmployerName": "blinkit",
+                "JobTitle": "Grocery Delivery Executive",
+                "MinimumExperience": 0,
+                "MaximunExperience": 372,
+                "AverageExp": 186,
+                "JobStartDate": "2025-03-24T23:53:43",
+                "JobExpiryDate": "2025-04-07T23:59:59",
+                "MaximunWages": 50000,
+                "MinimumWages": 40000,
+                "AverageWage": 45000,
+                "NumberofOpenings": 1,
+                "EmploymentType": "Full Time",
+                "IndustryID": 14,
+                "IndustryName": "Specialized Professional Services",
+                "SectorId": 10,
+                "SectorName": "Company",
+                "Qualification": None,
+                "WageTypeDesc": "Monthly",
+                "StateName": "Haryana",
+                "DistrictName": "Gurugram",
+                "FunctionalAreaName": "Others",
+                "FunctionalRoleName": "Others",
+                "JobDescription": "Hey there! Looking for a flexible and rewarding opportunity? Join our team as a Grocery Delivery Executive at Blinkit. You will be responsible for delivering groceries to customers in a timely manner.",
+                "VacancyURL": "https://www.ncs.gov.in/job-seeker/Pages/ViewJobDetails.aspx?JSID=IwTJw8ew3sE%3D&RowID=IwTJw8ew3sE%3D",
+                "PostedDate": "2025-03-24T00:00:00",
+                "Skills": "delivery",
+                "EmployerMobile": "",
+                "EmployerEmail": "",
+                "PersonName": "roshita silwani"
             },
             {
-                "keywords": "Active learning;Adaptability;Analytical & Critical Skills;Attention;Communication;Communication skills",
-                "ncsp_job_id": "20V63-1550061073345J",
-                "date": "2025-05-08",
-                "organization_id": 2336905,
-                "organization_name": "KARPAGA Assessment APP MATRIX Services Private Limited",
-                "number_of_openings": 10,
-                "industry_name": "Education",
-                "sector_name": "Private",
-                "functional_area_name": "Education",
-                "functional_role_name": "Fresher",
-                "avg_experience": 12,
-                "avg_wage": 0,
-                "gender_code": "A",
-                "highest_qualification": "Graduate",
-                "state_name": "Bihar",
-                "district_name": "ALL",
-                "title": "Public speaking teacher",
-                "description": "JOB DESCRIPTION: It's a Public Speaking/English Teacher Job where you need to conduct demos on a regular basis and convert them to enrolments/sales. ABOUT THE COMPANY: Fantastiqo is an Edu-Tech company which provides online courses on different fields.",
-                "pin_code": None,
-                "latitude": None,
-                "longitude": None
+                "JobID": 5427170,
+                "EmployerName": "MUTHOOT FINANCE LTD",
+                "JobTitle": "Branch Sales Executive",
+                "MinimumExperience": 0,
+                "MaximunExperience": 60,
+                "AverageExp": 30,
+                "JobStartDate": "2025-03-25T10:00:00",
+                "JobExpiryDate": "2025-04-25T23:59:59",
+                "MaximunWages": 25000,
+                "MinimumWages": 15000,
+                "AverageWage": 20000,
+                "NumberofOpenings": 700,
+                "EmploymentType": "Full Time",
+                "IndustryID": 8,
+                "IndustryName": "Finance and Insurance",
+                "SectorId": 10,
+                "SectorName": "Company",
+                "Qualification": "Graduate",
+                "WageTypeDesc": "Monthly",
+                "StateName": "Telangana",
+                "DistrictName": "Hyderabad",
+                "FunctionalAreaName": "Marketing & Sales",
+                "FunctionalRoleName": "Sales Executive",
+                "JobDescription": "Key Responsibilities: Assist in daily branch Gold loan operations and customer service. Support branch team in handling customer queries and resolving issues. Participate in lead generation, client acquisition, and retention activities.",
+                "VacancyURL": "https://www.ncs.gov.in/job-seeker/Pages/ViewJobDetails.aspx?JSID=test123",
+                "PostedDate": "2025-03-25T00:00:00",
+                "Skills": "acquisition,Marketing,Retention,customer service",
+                "EmployerMobile": "",
+                "EmployerEmail": "hr@muthootfinance.com",
+                "PersonName": "HR Team"
             }
         ]
 
@@ -291,66 +397,87 @@ async def consume_api_test_endpoint():
                     # Validate job data structure
                     job_data = JobData(**job_item)
 
-                    # Insert into database
+                    # Insert into database with new schema
                     insert_query = """
-                    INSERT INTO job_data
-                    (keywords, ncsp_job_id, date, organization_id, organization_name,
-                     number_of_openings, industry_name, sector_name, functional_area_name,
-                     functional_role_name, avg_experience, avg_wage, gender_code,
-                     highest_qualification, state_name, district_name, title, description,
-                     pin_code, latitude, longitude, created_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())
-                    ON CONFLICT (ncsp_job_id) DO UPDATE SET
-                        keywords = EXCLUDED.keywords,
-                        organization_name = EXCLUDED.organization_name,
+                    INSERT INTO ncs_job_data
+                    (job_id, employer_name, job_title, minimum_experience, maximum_experience,
+                     average_experience, job_start_date, job_expiry_date, maximum_wages, minimum_wages,
+                     average_wage, number_of_openings, employment_type, industry_id, industry_name,
+                     sector_id, sector_name, qualification, wage_type_desc, state_name, district_name,
+                     functional_area_name, functional_role_name, job_description, vacancy_url,
+                     posted_date, skills, employer_mobile, employer_email, person_name, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, NOW())
+                    ON CONFLICT (job_id) DO UPDATE SET
+                        employer_name = EXCLUDED.employer_name,
+                        job_title = EXCLUDED.job_title,
+                        minimum_experience = EXCLUDED.minimum_experience,
+                        maximum_experience = EXCLUDED.maximum_experience,
+                        average_experience = EXCLUDED.average_experience,
+                        job_start_date = EXCLUDED.job_start_date,
+                        job_expiry_date = EXCLUDED.job_expiry_date,
+                        maximum_wages = EXCLUDED.maximum_wages,
+                        minimum_wages = EXCLUDED.minimum_wages,
+                        average_wage = EXCLUDED.average_wage,
                         number_of_openings = EXCLUDED.number_of_openings,
+                        employment_type = EXCLUDED.employment_type,
+                        industry_id = EXCLUDED.industry_id,
                         industry_name = EXCLUDED.industry_name,
+                        sector_id = EXCLUDED.sector_id,
                         sector_name = EXCLUDED.sector_name,
-                        functional_area_name = EXCLUDED.functional_area_name,
-                        functional_role_name = EXCLUDED.functional_role_name,
-                        avg_experience = EXCLUDED.avg_experience,
-                        avg_wage = EXCLUDED.avg_wage,
-                        gender_code = EXCLUDED.gender_code,
-                        highest_qualification = EXCLUDED.highest_qualification,
+                        qualification = EXCLUDED.qualification,
+                        wage_type_desc = EXCLUDED.wage_type_desc,
                         state_name = EXCLUDED.state_name,
                         district_name = EXCLUDED.district_name,
-                        title = EXCLUDED.title,
-                        description = EXCLUDED.description,
-                        pin_code = EXCLUDED.pin_code,
-                        latitude = EXCLUDED.latitude,
-                        longitude = EXCLUDED.longitude,
+                        functional_area_name = EXCLUDED.functional_area_name,
+                        functional_role_name = EXCLUDED.functional_role_name,
+                        job_description = EXCLUDED.job_description,
+                        vacancy_url = EXCLUDED.vacancy_url,
+                        posted_date = EXCLUDED.posted_date,
+                        skills = EXCLUDED.skills,
+                        employer_mobile = EXCLUDED.employer_mobile,
+                        employer_email = EXCLUDED.employer_email,
+                        person_name = EXCLUDED.person_name,
                         updated_at = NOW()
                     """
 
                     await conn.execute(
                         insert_query,
-                        job_data.keywords,
-                        job_data.ncsp_job_id,
-                        job_data.date,
-                        job_data.organization_id,
-                        job_data.organization_name,
-                        job_data.number_of_openings,
-                        job_data.industry_name,
-                        job_data.sector_name,
-                        job_data.functional_area_name,
-                        job_data.functional_role_name,
-                        job_data.avg_experience,
-                        job_data.avg_wage,
-                        job_data.gender_code,
-                        job_data.highest_qualification,
-                        job_data.state_name,
-                        job_data.district_name,
-                        job_data.title,
-                        job_data.description,
-                        job_data.pin_code,
-                        job_data.latitude,
-                        job_data.longitude
+                        job_data.JobID,
+                        job_data.EmployerName,
+                        job_data.JobTitle,
+                        job_data.MinimumExperience,
+                        job_data.MaximunExperience,
+                        job_data.AverageExp,
+                        job_data.JobStartDate,
+                        job_data.JobExpiryDate,
+                        job_data.MaximunWages,
+                        job_data.MinimumWages,
+                        job_data.AverageWage,
+                        job_data.NumberofOpenings,
+                        job_data.EmploymentType,
+                        job_data.IndustryID,
+                        job_data.IndustryName,
+                        job_data.SectorId,
+                        job_data.SectorName,
+                        job_data.Qualification,
+                        job_data.WageTypeDesc,
+                        job_data.StateName,
+                        job_data.DistrictName,
+                        job_data.FunctionalAreaName,
+                        job_data.FunctionalRoleName,
+                        job_data.JobDescription,
+                        job_data.VacancyURL,
+                        job_data.PostedDate,
+                        job_data.Skills,
+                        job_data.EmployerMobile,
+                        job_data.EmployerEmail,
+                        job_data.PersonName
                     )
 
                     jobs_processed += 1
 
                 except Exception as e:
-                    logger.error(f"Error processing job item: {e}")
+                    logger.error(f"Error processing job item {job_item.get('JobID', 'unknown')}: {e}")
                     continue
 
         return ConsumeAPIResponse(
